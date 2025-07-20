@@ -1,0 +1,66 @@
+# VideoNexus Backend Dockerfile
+FROM node:20-alpine AS base
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apk add --no-cache \
+    dumb-init \
+    curl \
+    postgresql-client
+
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
+
+# Install dependencies
+FROM base AS dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Development dependencies
+FROM base AS dev-dependencies
+RUN npm ci
+
+# Build stage
+FROM dev-dependencies AS build
+COPY . .
+RUN npm run build:server
+RUN npm run db:generate
+
+# Production stage
+FROM base AS production
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S videonexus -u 1001
+
+# Copy production dependencies
+COPY --from=dependencies /app/node_modules ./node_modules
+
+# Copy built application
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/migrations ./migrations
+COPY --from=build /app/shared ./shared
+
+# Copy necessary config files
+COPY package.json ./
+COPY drizzle.config.ts ./
+
+# Create necessary directories and set permissions
+RUN mkdir -p uploads logs && \
+    chown -R videonexus:nodejs /app
+
+# Switch to non-root user
+USER videonexus
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-3000}/health || exit 1
+
+# Expose port
+EXPOSE 3000
+
+# Start application with dumb-init
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/index.js"]
